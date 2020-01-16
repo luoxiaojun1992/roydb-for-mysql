@@ -34,12 +34,8 @@ use Swoole\Coroutine;
 class SMProxyServer extends BaseServer
 {
     public $source;
-    public $mysqlClient;
     private $mysqlServer;
     protected $dbConfig;
-    public $halfPack;
-    public $stmtId = [];
-    public $stmtPrepare = [];
 
     /**
      * SMProxyServer constructor.
@@ -84,77 +80,21 @@ class SMProxyServer extends BaseServer
      */
     public function onReceive(\swoole_server $server, int $fd, int $reactor_id, string $data)
     {
-        self::go(function () use ($server, $fd, $reactor_id, $data) {
-            if (!isset($this->source[$fd]->auth)) {
-                throw new SMProxyException('Must be connected before sending data!');
+        $bin = (new MySqlPacketDecoder())->decode($data);
+        if (!$this->source[$fd]->auth) {
+            $this->auth($bin, $server, $fd);
+        } else {
+            if ($data === '!select @@version_comment limit 1') {
+                $mysqlPacket = new BinaryPacket();
+                $mysqlPacket->packetId = 1;
+                $mysqlPacket->packetLength = 1;
+                $mysqlPacket->data = 'Number of fields: 1';
+                $mysqlPacket->write();
             }
-            if (!isset($this->halfPack[$fd])) {
-                $this->halfPack[$fd] = '';
-            }
-            if (!$data) {
-                return;
-            }
-            self::go(function () use ($server, $fd, $reactor_id, $data) {
-                $bin = (new MySqlPacketDecoder())->decode($data);
-                // 处理SMProxy 命令
-                if ($bin->data[4] == SMProxyPacket::$SMPROXY) {
-                    $command = substr($data, 5);
-                    switch ($command) {
-                        //获取服务状态信息
-                        case "status":
-                            $statusData = [];
-                            foreach ($this->mysqlServer as $key => $row) {
-                                $statusData[$key] = $row;
-                            }
-                            $server->send($fd, base64_encode(json_encode($statusData)));
-                            unset($statusData);
-                            break;
-                    }
-                    return;
-                }
-                if (!$this->source[$fd]->auth) {
-                    $this->auth($bin, $server, $fd);
-                } else {
-                    $this->query($bin, $data, $fd);
-                    if (isset($this->connectReadState[$fd]) && true === $this->connectReadState[$fd]) {
-                        $model = 'read';
-                    } else {
-                        $model = 'write';
-                    }
-                    $key = $this->compareModel($model, $server, $fd);
-                    if ($data) {
-                        if (isset($this->mysqlClient[$fd][$key])) {
-                            $this->mysqlClient[$fd][$key]->send($data);
-                        } else {
-                            $client = MySQLPool::fetch($key, $server, $fd);
-                            $result = $client->send($data);
-                            if ($result) {
-                                $this->mysqlClient[$fd][$key] = $client;
-                            }
-                        }
-                    }
-                    //预处理语句id记录
-                    if (isset($this->mysqlClient[$fd][$key])) {
-                        $clientId = spl_object_hash($this->mysqlClient[$fd][$key]);
-                        switch ($bin->data[4]) {
-                            case MysqlPacket::$COM_STMT_PREPARE:
-                                if (isset($this->stmtId[$clientId])) {
-                                    $this->stmtId[$clientId]++;
-                                } else {
-                                    $this->stmtId[$clientId] = 1;
-                                }
-                                $this->stmtPrepare[$clientId][$this->stmtId[$clientId]] = $this->stmtId[$clientId];
-                                break;
-                            case MySQLPacket::$COM_STMT_CLOSE:
-                                $closeStmtId = getPackageLength($data, 5, 4) - 4;
-                                unset($this->stmtPrepare[$clientId][$closeStmtId]);
-                                break;
-                        }
-                        unset($clientId);
-                    }
-                }
-            });
-        });
+            var_dump($bin);
+            var_dump($data);
+            return;
+        }
     }
 
     /**
@@ -166,58 +106,6 @@ class SMProxyServer extends BaseServer
      */
     public function onClose(\swoole_server $server, int $fd)
     {
-        if (isset($this->source[$fd])) {
-            unset($this->source[$fd]);
-        }
-        if (isset($this->halfPack[$fd])) {
-            unset($this->halfPack[$fd]);
-        }
-        $connectHasTransaction = false;
-        $connectHasAutoCommit = false;
-        if (isset($this->connectHasTransaction[$fd]) && true === $this->connectHasTransaction[$fd]) {
-            //回滚未关闭事务
-            $connectHasTransaction = true;
-            unset($this->connectHasTransaction[$fd]);
-        }
-        if (isset($this->connectHasAutoCommit[$fd]) && true === $this->connectHasAutoCommit[$fd]) {
-            //开启autocommit=0未关闭
-            $connectHasAutoCommit = true;
-            unset($this->connectHasAutoCommit[$fd]);
-        }
-        if (isset($this->mysqlClient[$fd])) {
-            foreach ($this->mysqlClient[$fd] as $key => $mysqlClient) {
-                $model = explode(DB_DELIMITER, $key)[0];
-                if ($model == 'write') {
-                    if (isset($mysqlClient->client) && $mysqlClient->client) {
-                        if ($connectHasTransaction) {
-                            $mysqlClient->send(getString([9, 0, 0, 0, 3, 82, 79, 76, 76, 66, 65, 67, 75]));
-                        }
-                        if ($connectHasAutoCommit) {
-                            $mysqlClient->send(getString([
-                                17, 0, 0, 0, 3, 115, 101, 116, 32, 97, 117, 116, 111, 99, 111, 109, 109, 105, 116, 61, 49,
-                            ]));
-                        }
-                    }
-                }
-                //处理预处理语句连接断开未关闭
-                $clientId = spl_object_hash($mysqlClient);
-                if (isset($this->stmtPrepare[$clientId])) {
-                    $stmtIdes = $this->stmtPrepare[$clientId] ?? [];
-                    if (!empty($stmtIdes)) {
-                        foreach ($stmtIdes as $stmtId) {
-                            $mysqlClient->send(getString(array_merge([5, 0, 0, 0, 25], getMysqlPackSize($stmtId, 4))));
-                        }
-                    }
-                    unset($this->stmtPrepare[$clientId]);
-                }
-                unset($clientId);
-                MySQLPool::recycle($mysqlClient);
-            }
-            unset($this->mysqlClient[$fd]);
-        }
-        if (isset($this->connectReadState[$fd])) {
-            unset($this->connectReadState[$fd]);
-        }
         parent::onClose($server, $fd);
     }
 
@@ -229,98 +117,7 @@ class SMProxyServer extends BaseServer
      */
     public function onWorkerStart(\swoole_server $server, int $worker_id)
     {
-        self::go(function () use ($server, $worker_id) {
-            if ($worker_id >= CONFIG['server']['swoole']['worker_num']) {
-                ProcessHelper::setProcessTitle('SMProxy task    process');
-            } else {
-                ProcessHelper::setProcessTitle('SMProxy worker-' . $worker_id . '  process');
-                try {
-                    $this->dbConfig = $this->parseDbConfig(initConfig(CONFIG_PATH));
-                    //初始化链接
-                    MySQLPool::init($this->dbConfig, $this->mysqlServer);
-                } catch (MySQLException $exception) {
-                    self::writeErrorMessage($exception, 'mysql');
-                    $server->shutdown();
-                    return;
-                } catch (SMProxyException $exception) {
-                    self::writeErrorMessage($exception, 'system');
-                    $server->shutdown();
-                    return;
-                }
-                if ($worker_id === (CONFIG['server']['swoole']['worker_num'] - 1) && count($this->mysqlServer) === 0) {
-                    try {
-                        Coroutine::sleep(0.1);
-                        $this->setStartConns();
-                    } catch (MySQLException $exception) {
-                        self::writeErrorMessage($exception, 'mysql');
-                        $server->shutdown();
-                        return;
-                    }
-                    $system_log = Log::getLogger('system');
-                    $system_log->info('Worker started!');
-                    echo 'Worker started!', PHP_EOL;
-                }
-            }
-        });
-    }
-
-    /**
-     * 设置服务启动连接数
-     *
-     * @throws MySQLException
-     */
-    private function setStartConns()
-    {
-        $clients = [];
-        foreach ($this->dbConfig as $key => $value) {
-            if (count(explode(DB_DELIMITER, $key)) < 2) {
-                continue;
-            }
-            //测试数据库host port是否可连接
-            $test_client = new \Swoole\Coroutine\Client(SWOOLE_SOCK_TCP);
-            if (!$test_client->connect($value['serverInfo']['host'], $value['serverInfo']['port'], $value['serverInfo']['timeout'])) {
-                throw new MySQLException('connect ' . explode(DB_DELIMITER, $key)[0] .
-                    ' ' . explode(DB_DELIMITER, $key)[1] . ' failed, ErrorCode: ' . $test_client->errCode . "\n");
-            }
-            $test_client->close();
-            //初始化连接
-            if (!isset($value['startConns'])) {
-                $value['startConns'] = 1;
-            }
-            while ($value['startConns']) {
-                //初始化startConns
-                $mysql = new \Swoole\Coroutine\MySQL();
-                $mysql->connect([
-                    'host'     => CONFIG['server']['host'],
-                    'user'     => CONFIG['server']['user'],
-                    'port'     => CONFIG['server']['port'],
-                    'password' => CONFIG['server']['password'],
-                    'database' => explode(DB_DELIMITER, $key)[1],
-                ]);
-                if ($mysql->connect_errno) {
-                    throw new MySQLException(CONFIG['server']['host'] . ':' . CONFIG['server']['port'] . $mysql->connect_error);
-                }
-                $mysql->setDefer();
-                switch (explode(DB_DELIMITER, $key)[0]) {
-                    case 'read':
-                        $mysql->query('/*SMProxy test sql*/select sleep(0.01)');
-                        break;
-                    case 'write':
-                        $mysql->query('/*SMProxy test sql*/set autocommit=1');
-                        break;
-                }
-                $clients[] = $mysql;
-                $value['startConns']--;
-            }
-        }
-        foreach ($clients as $client) {
-            $client->recv();
-            if ($client->errno) {
-                throw new MySQLException($client->error);
-            }
-            $client->close();
-        }
-        unset($clients);
+        //
     }
 
     /**
