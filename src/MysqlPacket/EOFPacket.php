@@ -9,7 +9,7 @@ class EOFPacket extends MySQLPacket
      */
     public function calcPacketSize()
     {
-        // TODO: Implement calcPacketSize() method.
+        return 5;// 1+2+2;
     }
 
     /**
@@ -17,6 +17,6 @@ class EOFPacket extends MySQLPacket
      */
     protected function getPacketInfo()
     {
-        // TODO: Implement getPacketInfo() method.
+        return 'MySQL EOF Packet';
     }
 }

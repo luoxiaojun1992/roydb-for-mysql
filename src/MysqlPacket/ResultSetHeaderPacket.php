@@ -2,14 +2,23 @@
 
 namespace SMProxy\MysqlPacket;
 
+use SMProxy\MysqlPacket\Util\BufferUtil;
+
 class ResultSetHeaderPacket extends MySQLPacket
 {
+    public $fieldCount;
+    public $extra;
+
     /**
      * @inheritDoc
      */
     public function calcPacketSize()
     {
-        // TODO: Implement calcPacketSize() method.
+        $size = BufferUtil::getLength($this->fieldCount);
+        if ($this->extra > 0) {
+            $size += BufferUtil::getLength($this->extra);
+        }
+        return $size;
     }
 
     /**
@@ -17,6 +26,6 @@ class ResultSetHeaderPacket extends MySQLPacket
      */
     protected function getPacketInfo()
     {
-        return 'MySQL Result Set Packet';
+        return 'MySQL ResultSetHeader Packet';
     }
 }
