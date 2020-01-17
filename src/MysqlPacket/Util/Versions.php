@@ -13,5 +13,5 @@ interface Versions
     const PROTOCOL_VERSION = 10;
 
     /** 服务器版本 */
-    const SERVER_VERSION = '5.6.0-SMProxy';
+    const SERVER_VERSION = '0.1.0-RoyDB';
 }

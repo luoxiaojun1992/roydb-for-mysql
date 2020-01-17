@@ -21,6 +21,19 @@ class ResultSetHeaderPacket extends MySQLPacket
         return $size;
     }
 
+    public function write()
+    {
+        $data = [];
+        $size = $this->calcPacketSize();
+        BufferUtil::writeUB3($data, $size);
+        $data[] = $this->packetId;
+        BufferUtil::writeLength($data, $this->fieldCount);
+        if ($this->extra > 0) {
+            BufferUtil::writeLength($data, $this->extra);
+        }
+        return $data;
+    }
+
     /**
      * @inheritDoc
      */

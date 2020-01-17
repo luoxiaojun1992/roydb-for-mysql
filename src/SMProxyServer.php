@@ -3,16 +3,15 @@
 namespace SMProxy;
 
 use SMProxy\Handler\Frontend\FrontendAuthenticator;
-use SMProxy\Handler\Frontend\FrontendConnection;
-use SMProxy\MysqlPacket\SMProxyPacket;
+use SMProxy\MysqlPacket\CommandPacket;
+use SMProxy\MysqlPacket\EOFPacket;
+use SMProxy\MysqlPacket\FieldPacket;
+use SMProxy\MysqlPacket\ResultSetHeaderPacket;
+use SMProxy\MysqlPacket\RowDataPacket;
 use function SMProxy\Helper\array_copy;
 use function SMProxy\Helper\getBytes;
 use function SMProxy\Helper\getMysqlPackSize;
-use function SMProxy\Helper\getPackageLength;
 use function SMProxy\Helper\getString;
-use function SMProxy\Helper\initConfig;
-use SMProxy\Helper\ProcessHelper;
-use SMProxy\Log\Log;
 use SMProxy\MysqlPacket\AuthPacket;
 use SMProxy\MysqlPacket\BinaryPacket;
 use SMProxy\MysqlPacket\MySqlPacketDecoder;
@@ -21,10 +20,7 @@ use SMProxy\MysqlPacket\OkPacket;
 use SMProxy\MysqlPacket\Util\ErrorCode;
 use SMProxy\MysqlPacket\Util\RandomUtil;
 use SMProxy\MysqlPool\MySQLException;
-use SMProxy\MysqlPool\MySQLPool;
-use SMProxy\Parser\ServerParse;
-use SMProxy\Route\RouteService;
-use Swoole\Coroutine;
+use function SMProxy\Helper\startsWith;
 
 /**
  * Author: Louis Livi <574747417@qq.com>
@@ -73,10 +69,12 @@ class SMProxyServer extends BaseServer
     /**
      * 接收消息.
      *
-     * @param $server
-     * @param $fd
-     * @param $reactor_id
-     * @param $data
+     * @param \swoole_server $server
+     * @param int $fd
+     * @param int $reactor_id
+     * @param string $data
+     * @throws MySQLException
+     * @throws SMProxyException
      */
     public function onReceive(\swoole_server $server, int $fd, int $reactor_id, string $data)
     {
@@ -84,16 +82,99 @@ class SMProxyServer extends BaseServer
         if (!$this->source[$fd]->auth) {
             $this->auth($bin, $server, $fd);
         } else {
-            if ($data === '!select @@version_comment limit 1') {
-                $mysqlPacket = new BinaryPacket();
-                $mysqlPacket->packetId = 1;
-                $mysqlPacket->packetLength = 1;
-                $mysqlPacket->data = 'Number of fields: 1';
-                $mysqlPacket->write();
+            $command = new CommandPacket();
+            $command->read($bin);
+            if ($command->command === MySQLPacket::$COM_QUERY) {
+                if (getString($command->arg) === 'select @@version_comment limit 1') {
+                    $resultSetHeader = new ResultSetHeaderPacket();
+                    $resultSetHeader->packetId = 1;
+                    $resultSetHeader->fieldCount = 1;
+
+                    $field = new FieldPacket();
+                    $field->packetId = 2;
+                    $field->db = getBytes('');
+                    $field->table = getBytes('');
+                    $field->orgTable = getBytes('');
+                    $field->catalog = getBytes(FieldPacket::DEFAULT_CATALOG);
+                    $field->name = getBytes('@@version_comment');
+                    $field->orgName = getBytes('');
+                    $field->charsetIndex = 0x21;
+                    $field->length = 0x54;
+                    $field->type = 0xFD;
+                    $field->flags = 0x0000;
+                    $field->decimals = 31;
+
+                    $eof1 = new EOFPacket();
+                    $eof1->packetId = 3;
+                    $eof1->warningCount = 0;
+                    $eof1->status = 0x0002;
+
+                    $rowData = new RowDataPacket();
+                    $rowData->packetId = 4;
+                    $rowData->fieldCount = 1;
+                    $rowData->fieldValues[] = 'MySQL Community Server (GPL)';
+
+                    $eof2 = new EOFPacket();
+                    $eof2->packetId = 5;
+                    $eof2->warningCount = 0;
+                    $eof2->status = 0x0002;
+                    if ($server->exist($fd)) {
+                        var_dump($server->send($fd, getString(
+                            array_merge(
+                                $resultSetHeader->write(),
+                                $field->write(),
+                                $eof1->write(),
+                                $rowData->write(),
+                                $eof2->write()
+                            )
+                        )));
+                    }
+                } else {
+                    $resultSetHeader = new ResultSetHeaderPacket();
+                    $resultSetHeader->packetId = 1;
+                    $resultSetHeader->fieldCount = 1;
+
+                    $field = new FieldPacket();
+                    $field->packetId = 2;
+                    $field->db = getBytes('');
+                    $field->table = getBytes('');
+                    $field->orgTable = getBytes('');
+                    $field->catalog = getBytes(FieldPacket::DEFAULT_CATALOG);
+                    $field->name = getBytes('@@version_comment');
+                    $field->orgName = getBytes('');
+                    $field->charsetIndex = 0x21;
+                    $field->length = 0x54;
+                    $field->type = 0xFD;
+                    $field->flags = 0x0000;
+                    $field->decimals = 31;
+
+                    $eof1 = new EOFPacket();
+                    $eof1->packetId = 3;
+                    $eof1->warningCount = 0;
+                    $eof1->status = 0x0002;
+
+                    $rowData = new RowDataPacket();
+                    $rowData->packetId = 4;
+                    $rowData->fieldCount = 1;
+                    $rowData->fieldValues[] = 'MySQL Community Server (GPL)';
+
+                    $eof2 = new EOFPacket();
+                    $eof2->packetId = 5;
+                    $eof2->warningCount = 0;
+                    $eof2->status = 0x0002;
+                    if ($server->exist($fd)) {
+                        var_dump($server->send($fd, getString(
+                            array_merge(
+                                $resultSetHeader->write(),
+                                $field->write(),
+                                $eof1->write(),
+                                $rowData->write(),
+                                $eof2->write()
+                            )
+                        )));
+                    }
+                }
             }
-            var_dump($bin);
-            var_dump($data);
-            return;
         }
     }
 
@@ -282,107 +363,6 @@ class SMProxyServer extends BaseServer
                 $this->source[$fd]->auth = true;
                 $this->source[$fd]->database = $authPacket->database;
             }
-        }
-    }
-
-    /**
-     * 语句解析处理
-     *
-     * @param BinaryPacket $bin
-     * @param string $data
-     * @param int $fd
-     *
-     * @throws MySQLException
-     */
-    private function query(BinaryPacket $bin, string &$data, int $fd)
-    {
-        $trim_data = rtrim($data);
-        $data_len = strlen($trim_data);
-        switch ($bin->data[4]) {
-            case MySQLPacket::$COM_INIT_DB:
-                // just init the frontend
-                break;
-            case MySQLPacket::$COM_STMT_PREPARE:
-            case MySQLPacket::$COM_QUERY:
-                $connection = new FrontendConnection();
-                $queryType = $connection->query($bin);
-                $hintArr = RouteService::route(substr($data, 5, strlen($data) - 5));
-                if (isset($hintArr['db_type'])) {
-                    switch ($hintArr['db_type']) {
-                        case 'read':
-                            if ($queryType == ServerParse::DELETE || $queryType == ServerParse::INSERT ||
-                                $queryType == ServerParse::REPLACE || $queryType == ServerParse::UPDATE ||
-                                $queryType == ServerParse::DDL) {
-                                $this->connectReadState[$fd] = false;
-                                $system_log = Log::getLogger('system');
-                                $system_log->warning("should not use hint 'db_type' to route 'delete', 'insert', 'replace', 'update', 'ddl' to a slave db.");
-                            } else {
-                                $this->connectReadState[$fd] = true;
-                            }
-                            break;
-                        case 'write':
-                            $this->connectReadState[$fd] = false;
-                            break;
-                        default:
-                            $this->connectReadState[$fd] = false;
-                            $system_log = Log::getLogger('system');
-                            $system_log->warning("use hint 'db_type' value is not found.");
-                            break;
-                    }
-                } elseif (ServerParse::SELECT == $queryType ||
-                    ServerParse::SHOW == $queryType ||
-                    (ServerParse::SET == $queryType && false === strpos($data, 'autocommit', 4)) ||
-                    ServerParse::USE == $queryType
-                ) {
-                    //处理读操作
-                    if (!isset($this->connectHasTransaction[$fd]) ||
-                        !$this->connectHasTransaction[$fd]) {
-                        if ($data_len > 6 && (('u' == $trim_data[$data_len - 6] || 'U' == $trim_data[$data_len - 6]) &&
-                                ServerParse::UPDATE == ServerParse::uCheck($trim_data, $data_len - 6, false))) {
-                            //判断悲观锁
-                            $this->connectReadState[$fd] = false;
-                        } else {
-                            $this->connectReadState[$fd] = true;
-                        }
-                    }
-                } elseif (ServerParse::START == $queryType || ServerParse::BEGIN == $queryType
-                ) {
-                    //处理事务
-                    $this->connectHasTransaction[$fd] = true;
-                    $this->connectReadState[$fd] = false;
-                } elseif (ServerParse::SET == $queryType && false !== strpos($data, 'autocommit', 4) &&
-                    0 == $trim_data[$data_len - 1]) {
-                    //处理autocommit事务
-                    $this->connectHasAutoCommit[$fd] = true;
-                    $this->connectHasTransaction[$fd] = true;
-                    $this->connectReadState[$fd] = false;
-                } elseif (ServerParse::SET == $queryType && false !== strpos($data, 'autocommit', 4) &&
-                    1 == $trim_data[$data_len - 1]) {
-                    $this->connectHasAutoCommit[$fd] = false;
-                    $this->connectReadState[$fd] = false;
-                } elseif (ServerParse::COMMIT == $queryType || ServerParse::ROLLBACK == $queryType) {
-                    //事务提交
-                    $this->connectHasTransaction[$fd] = false;
-                } else {
-                    $this->connectReadState[$fd] = false;
-                }
-                break;
-            case MySQLPacket::$COM_PING:
-                break;
-            case MySQLPacket::$COM_QUIT:
-                //禁用客户端退出
-                $data = '';
-                break;
-            case MySQLPacket::$COM_PROCESS_KILL:
-                break;
-            case MySQLPacket::$COM_STMT_EXECUTE:
-                break;
-            case MySQLPacket::$COM_STMT_CLOSE:
-                break;
-            case MySQLPacket::$COM_HEARTBEAT:
-                break;
-            default:
-                break;
         }
     }
 }
