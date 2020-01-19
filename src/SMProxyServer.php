@@ -132,11 +132,29 @@ class SMProxyServer extends BaseServer
                     }
                 } else {
                     $sql = getString($command->arg);
-                    $selectResponse = (new QueryClient())->Select(
-                        (new SelectRequest())->setSql($sql)
-                    );
+
+                    try {
+                        $selectResponse = (new QueryClient())->Select(
+                            (new SelectRequest())->setSql($sql)
+                        );
+                        if (!$selectResponse) {
+                            throw new \RuntimeException('SMProxy@empty response from roydb');
+                        }
+                    } catch (\Throwable $e) {
+                        $message = 'SMProxy@unknown error from roydb';
+                        $errMessage = self::writeErrMessage(
+                            1,
+                            $message,
+                            ErrorCode::ER_UNKNOWN_ERROR
+                        );
+                        if ($server->exist($fd)) {
+                            $server->send($fd, getString($errMessage));
+                        }
+                        throw new MySQLException($e->getMessage(), $e->getCode(), $e);
+                    }
 
                     $resultSet = [];
+
                     $rows = $selectResponse->getRowData();
                     foreach ($rows as $row) {
                         $rowData = [];
@@ -154,33 +172,41 @@ class SMProxyServer extends BaseServer
                         $resultSet[] = $rowData;
                     }
 
+                    if (count($resultSet) <= 0) {
+                        if ($server->exist($fd)) {
+                            $server->send($fd, getString(OkPacket::$OK));
+                            return;
+                        }
+                    }
+
                     $buffer = [];
 
                     $packetId = 1;
 
-                    $fieldCount = count($resultSet[0]);
+                    $fieldCount = count($resultSet) > 0 ? count($resultSet[0]) : 0;
 
                     $resultSetHeader = new ResultSetHeaderPacket();
                     $resultSetHeader->packetId = $packetId++;
                     $resultSetHeader->fieldCount = $fieldCount;
-
                     $buffer = array_merge($buffer, $resultSetHeader->write());
 
-                    foreach ($resultSet[0] as $key => $value) {
-                        $field = new FieldPacket();
-                        $field->packetId = $packetId++;
-                        $field->db = getBytes('');
-                        $field->table = getBytes('');
-                        $field->orgTable = getBytes('');
-                        $field->catalog = getBytes(FieldPacket::DEFAULT_CATALOG);
-                        $field->name = getBytes($key);
-                        $field->orgName = getBytes('');
-                        $field->charsetIndex = 0x21;
-                        $field->length = 0x00;
-                        $field->type = 0xFD;
-                        $field->flags = 0x0000;
-                        $field->decimals = 0;
-                        $buffer = array_merge($buffer, $field->write());
+                    if (count($resultSet) > 0) {
+                        foreach ($resultSet[0] as $key => $value) {
+                            $field = new FieldPacket();
+                            $field->packetId = $packetId++;
+                            $field->db = getBytes('');
+                            $field->table = getBytes('');
+                            $field->orgTable = getBytes('');
+                            $field->catalog = getBytes(FieldPacket::DEFAULT_CATALOG);
+                            $field->name = getBytes($key);
+                            $field->orgName = getBytes('');
+                            $field->charsetIndex = 0x21;
+                            $field->length = 0x00;
+                            $field->type = 0xFD;
+                            $field->flags = 0x0000;
+                            $field->decimals = 0;
+                            $buffer = array_merge($buffer, $field->write());
+                        }
                     }
 
                     $eof1 = new EOFPacket();
