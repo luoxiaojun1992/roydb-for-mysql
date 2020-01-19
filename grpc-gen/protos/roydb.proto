@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package roydb;
+
+service Query {
+    rpc Select (SelectRequest) returns (SelectResponse) {}
+}
+
+message SelectRequest {
+    string sql = 1;
+}
+
+message SelectResponse {
+    repeated RowData rowData = 1;
+}
+
+message RowData {
+    repeated Field field = 1;
+}
+
+message Field {
+    string key = 1;
+    string valueType = 2;
+    int64 intValue = 3;
+    double doubleValue = 4;
+    string strValue = 5;
+    string charset = 6;
+}

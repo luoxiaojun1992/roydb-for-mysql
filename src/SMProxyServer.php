@@ -2,12 +2,14 @@
 
 namespace SMProxy;
 
+use Roydb\SelectRequest;
 use SMProxy\Handler\Frontend\FrontendAuthenticator;
 use SMProxy\MysqlPacket\CommandPacket;
 use SMProxy\MysqlPacket\EOFPacket;
 use SMProxy\MysqlPacket\FieldPacket;
 use SMProxy\MysqlPacket\ResultSetHeaderPacket;
 use SMProxy\MysqlPacket\RowDataPacket;
+use SMProxy\Roydb\QueryClient;
 use function SMProxy\Helper\array_copy;
 use function SMProxy\Helper\getBytes;
 use function SMProxy\Helper\getMysqlPackSize;
@@ -20,7 +22,6 @@ use SMProxy\MysqlPacket\OkPacket;
 use SMProxy\MysqlPacket\Util\ErrorCode;
 use SMProxy\MysqlPacket\Util\RandomUtil;
 use SMProxy\MysqlPool\MySQLException;
-use function SMProxy\Helper\startsWith;
 
 /**
  * Author: Louis Livi <574747417@qq.com>
@@ -119,7 +120,7 @@ class SMProxyServer extends BaseServer
                     $eof2->warningCount = 0;
                     $eof2->status = 0x0002;
                     if ($server->exist($fd)) {
-                        var_dump($server->send($fd, getString(
+                        $server->send($fd, getString(
                             array_merge(
                                 $resultSetHeader->write(),
                                 $field->write(),
@@ -127,51 +128,85 @@ class SMProxyServer extends BaseServer
                                 $rowData->write(),
                                 $eof2->write()
                             )
-                        )));
+                        ));
                     }
                 } else {
-                    $resultSetHeader = new ResultSetHeaderPacket();
-                    $resultSetHeader->packetId = 1;
-                    $resultSetHeader->fieldCount = 1;
+                    $sql = getString($command->arg);
+                    $selectResponse = (new QueryClient())->Select(
+                        (new SelectRequest())->setSql($sql)
+                    );
 
-                    $field = new FieldPacket();
-                    $field->packetId = 2;
-                    $field->db = getBytes('');
-                    $field->table = getBytes('');
-                    $field->orgTable = getBytes('');
-                    $field->catalog = getBytes(FieldPacket::DEFAULT_CATALOG);
-                    $field->name = getBytes('@@version_comment');
-                    $field->orgName = getBytes('');
-                    $field->charsetIndex = 0x21;
-                    $field->length = 0x54;
-                    $field->type = 0xFD;
-                    $field->flags = 0x0000;
-                    $field->decimals = 31;
+                    $resultSet = [];
+                    $rows = $selectResponse->getRowData();
+                    foreach ($rows as $row) {
+                        $rowData = [];
+                        foreach ($row->getField() as $field) {
+                            $key = $field->getKey();
+                            $valueType = $field->getValueType();
+                            if ($valueType === 'integer') {
+                                $rowData[$key] = $field->getIntValue();
+                            } elseif ($valueType === 'double') {
+                                $rowData[$key] = $field->getDoubleValue();
+                            } elseif ($valueType === 'string') {
+                                $rowData[$key] = $field->getStrValue();
+                            }
+                        }
+                        $resultSet[] = $rowData;
+                    }
+
+                    $buffer = [];
+
+                    $packetId = 1;
+
+                    $fieldCount = count($resultSet[0]);
+
+                    $resultSetHeader = new ResultSetHeaderPacket();
+                    $resultSetHeader->packetId = $packetId++;
+                    $resultSetHeader->fieldCount = $fieldCount;
+
+                    $buffer = array_merge($buffer, $resultSetHeader->write());
+
+                    foreach ($resultSet[0] as $key => $value) {
+                        $field = new FieldPacket();
+                        $field->packetId = $packetId++;
+                        $field->db = getBytes('');
+                        $field->table = getBytes('');
+                        $field->orgTable = getBytes('');
+                        $field->catalog = getBytes(FieldPacket::DEFAULT_CATALOG);
+                        $field->name = getBytes($key);
+                        $field->orgName = getBytes('');
+                        $field->charsetIndex = 0x21;
+                        $field->length = 0x00;
+                        $field->type = 0xFD;
+                        $field->flags = 0x0000;
+                        $field->decimals = 0;
+                        $buffer = array_merge($buffer, $field->write());
+                    }
 
                     $eof1 = new EOFPacket();
-                    $eof1->packetId = 3;
+                    $eof1->packetId = $packetId++;
                     $eof1->warningCount = 0;
                     $eof1->status = 0x0002;
+                    $buffer = array_merge($buffer, $eof1->write());
 
-                    $rowData = new RowDataPacket();
-                    $rowData->packetId = 4;
-                    $rowData->fieldCount = 1;
-                    $rowData->fieldValues[] = 'MySQL Community Server (GPL)';
+                    foreach ($resultSet as $row) {
+                        $rowData = new RowDataPacket();
+                        $rowData->packetId = $packetId++;
+                        $rowData->fieldCount = $fieldCount;
+                        foreach ($row as $value) {
+                            $rowData->fieldValues[] = $value;
+                        }
+                        $buffer = array_merge($buffer, $rowData->write());
+                    }
 
                     $eof2 = new EOFPacket();
-                    $eof2->packetId = 5;
+                    $eof2->packetId = $packetId;
                     $eof2->warningCount = 0;
                     $eof2->status = 0x0002;
+                    $buffer = array_merge($buffer, $eof2->write());
+
                     if ($server->exist($fd)) {
-                        var_dump($server->send($fd, getString(
-                            array_merge(
-                                $resultSetHeader->write(),
-                                $field->write(),
-                                $eof1->write(),
-                                $rowData->write(),
-                                $eof2->write()
-                            )
-                        )));
+                        $server->send($fd, getString($buffer));
                     }
                 }
             }
